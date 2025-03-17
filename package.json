@@ -1,0 +1,17 @@
+{
+  "type": "module",
+  "scripts": {
+    "start": "node ./scripts/scripts.js"
+  },
+  "dependencies": {
+    "@cosmjs/amino": "0.32.4",
+    "@cosmjs/cosmwasm-stargate": "0.32.4",
+    "@cosmjs/encoding": "0.32.4",
+    "@cosmjs/math": "0.32.4",
+    "@cosmjs/proto-signing": "0.32.4",
+    "@cosmjs/stargate": "0.32.4",
+    "@cosmjs/tendermint-rpc": "0.32.4",
+    "dotenv": "^16.4.7",
+    "fs": "^0.0.1-security"
+  }
+}

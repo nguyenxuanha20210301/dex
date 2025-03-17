@@ -1,0 +1,61 @@
+[package]
+name = "dex"
+version = "0.1.0"
+authors = ["nguyenxuanha20210301 <xuanhak37a123@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = 'abort'
+incremental = false
+overflow-checks = true
+
+[features]
+# use library feature to disable all instantiate/execute/query exports
+library = []
+
+[package.metadata.scripts]
+optimize = """docker run --rm -v "$(pwd)":/code \
+  --mount type=volume,source="$(basename "$(pwd)")_cache",target=/target \
+  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
+  cosmwasm/optimizer:0.16.0
+"""
+
+# [dependencies]
+
+[dependencies]
+# [dependencies]
+cosmwasm-schema = "1.5.0"
+cosmwasm-std = "1.1.0"
+cosmwasm-storage = { version = "1.1.0", features = ["iterator"] }
+schemars = "0.8.1"
+serde = { version = "1.0.103", default-features = false, features = ["derive"] }
+thiserror = "1.0.2"
+cw20 = { version = "0.15.0" }
+cw20-base = { version = "0.15.0", features = ["library"] }
+cw-storage-plus = { version = "0.15.0" }
+# cosmwasm-schema = { version = "1.4.0" }
+# cosmwasm-std = { version = "1.4.0" }
+# cosmwasm-storage = "1.1.9"
+# schemars = "0.8.15"
+# thiserror = { version = "1.0.49" }
+# cw20-base = { version = "1.1.2", features = ["library"] }
+# cw20 = { version = "1.1.2" }
+# cw-storage-plus = { version = "1.4.0" }
+# schemars = "0.8.16"
+# serde = { version = "1.0.197", default-features = false, features = ["derive"] }
+# thiserror = { version = "2.0.12" }
+
+[dev-dependencies]
+
+
