@@ -187,24 +187,12 @@ pub mod execute {
             .map(|coin| coin.amount.clone()) // Retrieve the amount of ORAI received
             .unwrap_or_default(); // If ORAI is not found, return default value (zero)
 
-        if received_orai != orai_amount {
+        if received_orai >= orai_amount {
             return Err(ContractError::InvalidTokenAmount {});
         };
 
-        //3.check amount_usdt allowance for contract, sure it equal to usdt_amount
-        // let allowance = get_usdt_allowance(&deps, info.sender.clone().to_string(), env.contract.address.clone().to_string())?;
-        let allowance = get_cw20_token_allowance(
-            &deps, 
-            info.sender.clone().to_string(), 
-            env.contract.address.to_string(), 
-            contract_info.usdt_contract.to_string())?;
-
-        if allowance != usdt_amount {
-            return Err(ContractError::InvalidTokenAmount {});
-        };
-
+        //3.check if usdt_reserve = 0 || orai_reserve = 0
         let mut pool = POOL.load(deps.storage)?;
-        //4.check if usdt_reserve = 0 || orai_reserve = 0
         if pool.orai_reserve.is_zero() || pool.usdt_reserve.is_zero() {
             //update liquidity pool & mint lpt for sender
             pool.orai_reserve += orai_amount;
@@ -251,6 +239,17 @@ pub mod execute {
         }
 
         
+        //4.check amount_usdt allowance for contract, sure it equal to usdt_amount
+        // let allowance = get_usdt_allowance(&deps, info.sender.clone().to_string(), env.contract.address.clone().to_string())?;
+        let allowance = get_cw20_token_allowance(
+            &deps, 
+            info.sender.clone().to_string(), 
+            env.contract.address.to_string(), 
+            contract_info.usdt_contract.to_string())?;
+
+        if allowance < usdt_amount {
+            return Err(ContractError::InvalidTokenAmount {});
+        };
         //6.kiem tra orai_amount va usdt_amount, cu lay theo ty le nhung neu thua token nao thi phai gui lai cho nguoi dung 
 
         // let token_contract = if denom.as_str() == DENOM_USDT {
@@ -469,46 +468,6 @@ pub mod execute {
             .add_attribute("key", "123"))
     }
 }
-
-// #[cfg_attr(not(feature = "library"), entry_point)]
-// pub fn query(
-//     deps: DepsMut,
-//     _env: Env,
-//     // info: MessageInfo,
-//     msg: QueryMsg,
-// ) -> StdResult<Binary> {
-//     // unimplemented!()
-//     match msg {
-//         QueryMsg::QueryContractInfo { } => to_json_binary(&query_contract_info(deps)?), //to_json_binary(&query_marketing_info(deps)?),
-//         QueryMsg::QueryPoolInfo {  } =>  to_json_binary(&query_liquidity_pool_info(deps)?),
-//         QueryMsg::QueryLptBalance { user } => to_json_binary(&query_lpt_balance(deps, user)?),
-//     }
-// }
-
-
-// pub fn query_contract_info(deps: DepsMut) -> StdResult<ContractInfoResponse>{
-//     let ct_info = INFO.load(deps.storage)?;
-//     Ok(ContractInfoResponse { owner: ct_info.owner.to_string(), lpt_contract: ct_info.lpt_contract, usdt_contract: ct_info.usdt_contract })
-// }
-
-// pub fn query_liquidity_pool_info(deps: DepsMut) -> StdResult<PoolInfoResponse> {
-//     let pool = POOL.load(deps.storage)?;
-
-//     Ok(PoolInfoResponse { orai_reserve: pool.orai_reserve, usdt_reserve: pool.usdt_reserve, total_shares: pool.total_shares })
-// }
-
-// pub fn query_lpt_balance(deps: DepsMut, user: String) -> StdResult<LptBalanceResponse> {
-//     // Convert the user string to Addr
-//     let user_addr = deps.api.addr_validate(&user)?;
-
-//         // Query the balance from the LIQUIDITY_PROVIDERS map
-//     let balance = LIQUIDITY_PROVIDERS
-//         .load(deps.storage, &user_addr)
-//         .unwrap_or(Uint128::zero());
-
-//     // Return the response
-//     Ok(LptBalanceResponse { balance })
-// }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(
