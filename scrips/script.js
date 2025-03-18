@@ -50,7 +50,7 @@ async function main() {
     // const path = "./artifacts/dex.wasm"
     // const wasmCode = new Uint8Array(fs.readFileSync(path))
 
-    // console.log("UPload !!!!!!!!!!!!!!!!!!!!!");
+    console.log("UPload !!!!!!!!!!!!!!!!!!!!!");
     
     // // //upload code on chain
     // const upload = await client.upload(sender, wasmCode, fee)
@@ -82,22 +82,17 @@ async function main() {
     // };
     // const mint_response = await client.execute(address, contract_address, execute_mint_msg, fee);
     // console.log("Mint Response:", mint_response);
+    
     //===================================================================================
 
     //======================================QUERY========================================
 
-    // const query_example = await client.queryContractSmart(
-    //     contract_address, {example: {}})
-    // console.log(query_example)
 
-    // const query_balance_msg = {
-    //     balance: {
-    //         address: address
-    //     }
-    // };
-    // const balance_response = await client.queryContractSmart(contract_address, query_balance_msg);
-    // console.log("CW20 OCH Token Balance:", balance_response);
-
+    // const query_msg = {
+    //   query_pool_info: {}
+    // }
+    // const query_contract_info = await client.queryContractSmart(contract_address, query_msg);
+    // console.log(query_contract_info);
     //===================================================================================
 }
 
