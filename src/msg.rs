@@ -27,6 +27,8 @@ pub enum QueryMsg {
     #[returns(LptBalanceResponse)]
     QueryLptBalance { user: String },
 
+    #[returns(USDTAllowanceResponse)]
+    QueryUSDTAllowance { user: String },
 }
 
 
@@ -50,4 +52,9 @@ pub struct ContractInfoResponse {
     pub owner: String, 
     pub lpt_contract: String, 
     pub usdt_contract: String, 
+}
+
+#[cw_serde]
+pub struct USDTAllowanceResponse {
+    pub usdt_amount: Uint128, 
 }

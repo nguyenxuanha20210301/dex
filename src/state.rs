@@ -23,3 +23,6 @@ pub const LIQUIDITY_PROVIDERS: Map<&Addr, Uint128> = Map::new("liquidity_provide
 
 //storage for the contract info 
 pub const INFO: Item<ContractInfo> = Item::new("contract_info");
+
+//allowance amount usdt
+pub const USDT_ALLOWANCE: Map<&Addr, Uint128> = Map::new("usdt_allowance");

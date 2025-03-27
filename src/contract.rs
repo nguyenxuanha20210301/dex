@@ -1,29 +1,32 @@
 #[cfg(not(feature = "library"))]
-// use std::env;
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128, WasmMsg};
-// use cw2::set_contract_version;
+use cosmwasm_std::{to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128, WasmMsg};
 use cw20::{AllowanceResponse, Cw20ExecuteMsg};
-use crate::error::ContractError;
-use crate::msg::{ExecuteMsg, ContractInfoResponse, LptBalanceResponse, PoolInfoResponse, InstantiateMsg, QueryMsg};
-use crate::state::{ContractInfo, LiquidityPool, INFO, LIQUIDITY_PROVIDERS, POOL};
-
-// version info for migration info
-// const CONTRACT_NAME: &str = "crates.io:dex";
-// const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+// use crate::error::ContractError;
+use crate::msg::{ContractInfoResponse, ExecuteMsg, InstantiateMsg, LptBalanceResponse, PoolInfoResponse, QueryMsg, USDTAllowanceResponse};
+use crate::state::{ContractInfo, LiquidityPool, INFO, LIQUIDITY_PROVIDERS, POOL, USDT_ALLOWANCE};
+use std::str::FromStr;
 
 const DENOM_ORAI: &str = "orai";
 const DENOM_USDT: &str = "usdt";
+
+pub fn sqrt(value: Decimal) -> Decimal {
+    if value.is_zero() {
+        return Decimal::zero();
+    }
+    value.sqrt()
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
     _env: Env,
     info: MessageInfo,
     msg: InstantiateMsg,
-) -> Result<Response, ContractError> {
+) -> Result<Response, StdError> {
     let contract_info = ContractInfo {
         owner: info.sender.clone(),
-        usdt_contract: msg.usdt_contract.clone(), 
+        usdt_contract: msg.usdt_contract.clone(),
         lpt_contract: msg.lpt_contract.clone(),
     };
 
@@ -33,14 +36,12 @@ pub fn instantiate(
         total_shares: Uint128::zero(),
     };
 
-    // set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-
     INFO.save(deps.storage, &contract_info)?;
     POOL.save(deps.storage, &pool)?;
 
-    Ok(Response::new()  
+    Ok(Response::new()
         .add_attribute("method", "instantiate")
-        .add_attribute("owner", info.sender.clone())
+        .add_attribute("owner", info.sender)
         .add_attribute("usdt_contract", msg.usdt_contract)
         .add_attribute("lpt_contract", msg.lpt_contract))
 }
@@ -48,38 +49,35 @@ pub fn instantiate(
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
-) -> Result<Response, ContractError> {
-    // unimplemented!()
+) -> Result<Response, StdError> {
     match msg {
-        ExecuteMsg::AddLiquidity { orai_amount, usdt_amount } => execute::add_liquidity(deps, _env, info, orai_amount, usdt_amount),
-        ExecuteMsg::RemoveLiquidity { lpt_amount } => execute::remove_liquidity(deps, _env, info, lpt_amount),
-        ExecuteMsg::Swap { denom, amount } => execute::swap(deps, _env, info, denom, amount),
+        ExecuteMsg::AddLiquidity { orai_amount, usdt_amount } => add_liquidity(deps, env, info, orai_amount, usdt_amount),
+        ExecuteMsg::RemoveLiquidity { lpt_amount } => remove_liquidity(deps, env, info, lpt_amount),
+        ExecuteMsg::Swap { denom, amount } => swap(deps, env, info, denom, amount),
     }
 }
 
-pub fn get_cw20_token_allowance (
+pub fn query_cw20_token_allowance(
     deps: &DepsMut,
-    owner: String, 
-    spender: String, 
-    token_contract: String,
+    owner: String,
+    spender: String,
+    token_contract: &String,
 ) -> StdResult<Uint128> {
-
     let response: AllowanceResponse = deps.querier.query(&cosmwasm_std::QueryRequest::Wasm(cosmwasm_std::WasmQuery::Smart {
         contract_addr: token_contract.to_string(),
-        msg: to_json_binary(&cw20::Cw20QueryMsg::Allowance { owner: owner.to_string(), spender: spender.to_string() })?,
+        msg: to_json_binary(&cw20::Cw20QueryMsg::Allowance { owner, spender })?,
     }))?;
-    
     Ok(response.allowance)
 }
 
 pub fn calculate_swap_amount(
     pool: &LiquidityPool,
-    denom: &String, 
+    denom: &String,
     amount: Uint128,
-)-> StdResult<Uint128> {
+) -> StdResult<Uint128> {
     if denom.as_str() == DENOM_ORAI {
         let orai_reserve = pool.orai_reserve.u128();
         let usdt_reserve = pool.usdt_reserve.u128();
@@ -95,19 +93,21 @@ pub fn calculate_swap_amount(
         let denominator = usdt_reserve + amount_with_fee;
         Ok(Uint128::from(numerator / denominator))
     } else {
-        Err(StdError::generic_err("Unsupported token pair"))
+        Err(StdError::generic_err("calculate_swap_amount: Unsupported token pair"))
     }
 }
-
 
 pub fn transfer_orai(
     recipient: String,
     amount: Uint128,
 ) -> StdResult<CosmosMsg> {
+    if amount.is_zero() {
+        return Err(StdError::generic_err("transfer_orai: Amount must be greater than zero"));
+    }
     Ok(CosmosMsg::Bank(BankMsg::Send {
-        to_address: recipient.to_string(),
+        to_address: recipient,
         amount: vec![Coin {
-            denom: "orai".to_string(),
+            denom: DENOM_ORAI.to_string(),
             amount,
         }],
     }))
@@ -115,363 +115,379 @@ pub fn transfer_orai(
 
 pub fn transfer_usdt(
     deps: &DepsMut,
-    recipient: String, 
+    recipient: String,
     amount: Uint128,
 ) -> StdResult<CosmosMsg> {
+    if amount.is_zero() {
+        return Err(StdError::generic_err("transfer_usdt: Amount must be greater than zero"));
+    }
     let contract_info = INFO.load(deps.storage)?;
     let transfer_msg = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: contract_info.usdt_contract.to_string(),
-        msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-            recipient: recipient.to_string(),
-            amount,
-        })?,
+        msg: to_json_binary(&Cw20ExecuteMsg::Transfer { recipient, amount })?,
         funds: vec![],
     });
-
     Ok(transfer_msg)
 }
+
 pub fn transfer_token(
     deps: DepsMut,
-    denom: String, 
-    recipient: String, 
+    denom: String,
+    recipient: String,
     amount: Uint128,
 ) -> StdResult<CosmosMsg> {
     let contract_info = INFO.load(deps.storage)?;
-    let token_contract = if denom.as_str() == DENOM_USDT {
-        contract_info.usdt_contract
+    if denom.as_str() == DENOM_USDT {
+        let transfer_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_info.usdt_contract.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer { recipient, amount })?,
+            funds: vec![],
+        });
+        Ok(transfer_msg)
     } else if denom.as_str() == DENOM_ORAI {
-        return transfer_orai(recipient, amount);
+        transfer_orai(recipient, amount)
     } else {
-        return Err(StdError::generic_err("Unsupported token"));
+        Err(StdError::generic_err("transfer_token: Unsupported token denom"))
+    }
+}
+
+pub fn add_liquidity(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    orai_amount: Uint128,
+    usdt_amount: Uint128,
+) -> Result<Response, StdError> {
+    let contract_info = INFO.load(deps.storage)?;
+
+    if orai_amount.is_zero() || usdt_amount.is_zero() {
+        return Err(StdError::generic_err("add_liquidity: ORAI or USDT amount cannot be zero"));
+    }
+
+    let received_orai = info
+        .funds
+        .iter()
+        .find(|coin| coin.denom == DENOM_ORAI)
+        .map(|coin| coin.amount)
+        .unwrap_or_default();
+
+    if received_orai < orai_amount {
+        return Err(StdError::generic_err(format!(
+            "add_liquidity: Insufficient ORAI received. Expected: {}, Received: {}",
+            orai_amount, received_orai
+        )));
+    }
+
+    let mut pool = POOL.load(deps.storage)?;
+    if pool.orai_reserve.is_zero() || pool.usdt_reserve.is_zero() {
+        pool.orai_reserve += orai_amount;
+        pool.usdt_reserve += usdt_amount;
+
+        let a = Decimal::from_atomics(orai_amount, 0).unwrap();
+        let b = Decimal::from_atomics(usdt_amount, 0).unwrap();
+        let divisor = Decimal::from_str("3.14918").unwrap();
+        let lpt_mint_decimal = sqrt(a) * sqrt(b) / divisor;
+        let lpt_mint = lpt_mint_decimal.to_uint_floor(); // Sửa từ to_uint_floor trên Uint128 sang Decimal
+
+        pool.total_shares += lpt_mint;
+
+        let mint_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_info.lpt_contract.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Mint {
+                recipient: info.sender.to_string(),
+                amount: lpt_mint,
+            })?,
+            funds: vec![],
+        });
+
+        let sender = info.sender.clone();
+        let current_lpt_balance = LIQUIDITY_PROVIDERS.may_load(deps.storage, &sender)?.unwrap_or_default();
+        let new_lpt_balance = current_lpt_balance + lpt_mint;
+
+        let usdt_allowance = query_cw20_token_allowance(&deps, info.sender.to_string(), env.contract.address.to_string(), &contract_info.usdt_contract.to_string())?;
+        if usdt_allowance < usdt_amount {
+            return Err(StdError::generic_err(format!(
+                "add_liquidity: Insufficient USDT allowance. Required: {}, Available: {}",
+                usdt_amount, usdt_allowance
+            )));
+        }
+
+        let transfer_from_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_info.usdt_contract.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::TransferFrom {
+                owner: sender.to_string(),
+                recipient: env.contract.address.to_string(),
+                amount: usdt_amount,
+            })?,
+            funds: vec![],
+        });
+
+        USDT_ALLOWANCE.save(deps.storage, &sender, &usdt_allowance)?;
+        POOL.save(deps.storage, &pool)?;
+        LIQUIDITY_PROVIDERS.save(deps.storage, &sender, &new_lpt_balance)?;
+
+        return Ok(Response::new()
+            .add_message(mint_msg)
+            .add_message(transfer_from_msg)
+            .add_attribute("action", "add_liquidity")
+            .add_attribute("orai_amount", orai_amount.to_string())
+            .add_attribute("usdt_amount", usdt_amount.to_string())
+            .add_attribute("lpt_mint", lpt_mint.to_string()));
+    }
+
+    let pool_ratio = Decimal::from_ratio(pool.orai_reserve, pool.usdt_reserve);
+    let input_ratio = Decimal::from_ratio(orai_amount, usdt_amount);
+
+    let (orai_to_use, usdt_to_use, unused_orai, unused_usdt) = if input_ratio > pool_ratio {
+        let usdt_to_use = usdt_amount;
+        let orai_to_use = (pool_ratio * Decimal::from_atomics(usdt_to_use, 0).unwrap()).to_uint_floor();
+        let unused_orai = orai_amount - orai_to_use;
+        (orai_to_use, usdt_to_use, unused_orai, Uint128::zero())
+    } else if input_ratio < pool_ratio {
+        let orai_to_use = orai_amount;
+        let usdt_to_use = (Decimal::from_atomics(orai_to_use, 0).unwrap() * Decimal::from_ratio(pool.usdt_reserve, pool.orai_reserve)).to_uint_floor();
+        let unused_usdt = usdt_amount - usdt_to_use;
+        (orai_to_use, usdt_to_use, Uint128::zero(), unused_usdt)
+    } else {
+        (orai_amount, usdt_amount, Uint128::zero(), Uint128::zero())
     };
-    let transfer_msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: token_contract.to_string(),
-        msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-            recipient: recipient.to_string(),
-            amount,
+
+    let usdt_allowance = query_cw20_token_allowance(&deps, info.sender.to_string(), env.contract.address.to_string(), &contract_info.usdt_contract.to_string())?;
+    if usdt_allowance < usdt_to_use {
+        return Err(StdError::generic_err(format!(
+            "add_liquidity: Insufficient USDT allowance for non-empty pool. Required: {}, Available: {}",
+            usdt_to_use, usdt_allowance
+        )));
+    }
+
+    let lpt_mint = (Decimal::from_atomics(orai_to_use * pool.total_shares / pool.orai_reserve, 0).unwrap()).to_uint_floor(); // Sửa: Chuyển đổi Decimal sang Uint128
+    pool.orai_reserve += orai_to_use;
+    pool.usdt_reserve += usdt_to_use;
+    pool.total_shares += lpt_mint;
+
+    let sender = info.sender.clone();
+    let current_lpt_balance = LIQUIDITY_PROVIDERS.may_load(deps.storage, &sender)?.unwrap_or_default();
+    let new_lpt_balance = current_lpt_balance + lpt_mint;
+
+    let mint_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: contract_info.lpt_contract.to_string(),
+        msg: to_json_binary(&Cw20ExecuteMsg::Mint {
+            recipient: info.sender.to_string(),
+            amount: lpt_mint,
         })?,
         funds: vec![],
     });
 
-    Ok(transfer_msg)
+    let transfer_from_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: contract_info.usdt_contract.to_string(),
+        msg: to_json_binary(&Cw20ExecuteMsg::TransferFrom {
+            owner: sender.to_string(),
+            recipient: env.contract.address.to_string(),
+            amount: usdt_to_use,
+        })?,
+        funds: vec![],
+    });
+
+    let mut response = Response::new()
+        .add_message(transfer_from_msg)
+        .add_message(mint_msg)
+        .add_attribute("action", "add_liquidity")
+        .add_attribute("orai_amount", orai_to_use.to_string())
+        .add_attribute("usdt_amount", usdt_to_use.to_string())
+        .add_attribute("lpt_mint", lpt_mint.to_string());
+
+    if !unused_orai.is_zero() {
+        let msg_transfer_unused_orai = transfer_orai(info.sender.to_string(), unused_orai)?;
+        response = response.add_message(msg_transfer_unused_orai);
+    }
+
+    // if !unused_usdt.is_zero() {
+    //     let msg_transfer_unused_usdt = transfer_usdt(&deps, info.sender.to_string(), unused_usdt)?;
+    //     response = response.add_message(msg_transfer_unused_usdt);
+    // }
+
+    USDT_ALLOWANCE.save(deps.storage, &sender, &usdt_allowance)?;
+    LIQUIDITY_PROVIDERS.save(deps.storage, &sender, &new_lpt_balance)?;
+    POOL.save(deps.storage, &pool)?;
+
+    Ok(response)
 }
 
+pub fn remove_liquidity(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    lpt_amount: Uint128,
+) -> Result<Response, StdError> {
+    let contract_info = INFO.load(deps.storage)?;
 
+    if lpt_amount.is_zero() {
+        return Err(StdError::generic_err("remove_liquidity: LPT amount cannot be zero"));
+    }
 
-pub mod execute {
+    let approved_lpt = query_cw20_token_allowance(
+        &deps,
+        info.sender.to_string(),
+        env.contract.address.to_string(),
+        &contract_info.lpt_contract.to_string(),
+    )?;
+    if approved_lpt < lpt_amount {
+        return Err(StdError::generic_err(format!(
+            "remove_liquidity: Insufficient LPT allowance. Required: {}, Available: {}",
+            lpt_amount, approved_lpt
+        )));
+    }
 
-    use crate::state::{LIQUIDITY_PROVIDERS, POOL};
+    let sender = info.sender.clone();
+    let current_lpt_balance = LIQUIDITY_PROVIDERS.may_load(deps.storage, &sender)?.unwrap_or_default();
+    if current_lpt_balance < lpt_amount {
+        return Err(StdError::generic_err(format!(
+            "remove_liquidity: Insufficient LPT balance. Required: {}, Available: {}",
+            lpt_amount, current_lpt_balance
+        )));
+    }
 
-    use super::*;
+    let mut pool = POOL.load(deps.storage)?;
+    if pool.total_shares.is_zero() {
+        return Err(StdError::generic_err("remove_liquidity: Pool has no shares"));
+    }
 
-    pub fn add_liquidity(
-        deps: DepsMut,
-        env: Env, 
-        info: MessageInfo,
-        orai_amount: Uint128, 
-        usdt_amount: Uint128, 
-    ) -> Result<Response, ContractError> {
+    let orai_amount = Uint128::from(lpt_amount * pool.orai_reserve / pool.total_shares);
+    let usdt_amount = Uint128::from(lpt_amount * pool.usdt_reserve / pool.total_shares);
 
-        let contract_info = INFO.load(deps.storage)?;
+    if pool.orai_reserve < orai_amount || pool.usdt_reserve < usdt_amount {
+        return Err(StdError::generic_err(format!(
+            "remove_liquidity: Insufficient liquidity. ORAI required: {}, Available: {}. USDT required: {}, Available: {}",
+            orai_amount, pool.orai_reserve, usdt_amount, pool.usdt_reserve
+        )));
+    }
 
-        //1.sure orai_amount & usdt_amount != 0 
-        if orai_amount.is_zero() || usdt_amount.is_zero() {
-            return Err(ContractError::InvalidTokenAmount {});
-        };
+    pool.orai_reserve -= orai_amount;
+    pool.usdt_reserve -= usdt_amount;
+    pool.total_shares -= lpt_amount;
 
-        //2.check received orai in message, orai_amount must equal received orai
+    POOL.save(deps.storage, &pool)?;
+
+    let new_lpt_balance = current_lpt_balance - lpt_amount;
+    LIQUIDITY_PROVIDERS.save(deps.storage, &sender, &new_lpt_balance)?;
+
+    let burn_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: contract_info.lpt_contract.to_string(),
+        msg: to_json_binary(&Cw20ExecuteMsg::BurnFrom {
+            owner: info.sender.to_string(),
+            amount: lpt_amount,
+        })?,
+        funds: vec![],
+    });
+
+    let usdt_transfer_msg = transfer_usdt(&deps, info.sender.to_string(), usdt_amount)?;
+    let orai_transfer_msg = transfer_orai(info.sender.to_string(), orai_amount)?;
+
+    Ok(Response::new()
+        .add_message(burn_msg)
+        .add_message(orai_transfer_msg)
+        .add_message(usdt_transfer_msg)
+        .add_attribute("action", "remove_liquidity")
+        .add_attribute("lpt_amount", lpt_amount.to_string())
+        .add_attribute("receive_usdt", usdt_amount.to_string())
+        .add_attribute("receive_orai", orai_amount.to_string()))
+}
+
+pub fn swap(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    denom: String,
+    amount: Uint128,
+) -> Result<Response, StdError> {
+    let contract_info = INFO.load(deps.storage)?;
+
+    if amount.is_zero() {
+        return Err(StdError::generic_err("swap: Amount cannot be zero"));
+    }
+
+    let mut pool = POOL.load(deps.storage)?;
+    if pool.orai_reserve.is_zero() || pool.usdt_reserve.is_zero() {
+        return Err(StdError::generic_err("swap: Pool has no liquidity"));
+    }
+
+    let mut response = Response::new().add_attribute("action", "swap").add_attribute("amount", amount.to_string());
+
+    if denom.as_str() == DENOM_ORAI {
         let received_orai = info
             .funds
             .iter()
-            .find(|coin| coin.denom == "orai") // Assuming "orai" is the denom for the native ORAI token
-            .map(|coin| coin.amount.clone()) // Retrieve the amount of ORAI received
-            .unwrap_or_default(); // If ORAI is not found, return default value (zero)
-
-        if received_orai >= orai_amount {
-            return Err(ContractError::InvalidTokenAmount {});
-        };
-
-        //3.check if usdt_reserve = 0 || orai_reserve = 0
-        let mut pool = POOL.load(deps.storage)?;
-        if pool.orai_reserve.is_zero() || pool.usdt_reserve.is_zero() {
-            //update liquidity pool & mint lpt for sender
-            pool.orai_reserve += orai_amount;
-            pool.usdt_reserve += usdt_amount;
-
-                //calculate lpt_mint
-            let square_orai_amount = (orai_amount.u128() as f64).sqrt();
-            let square_usdt_amount = (usdt_amount.u128() as f64).sqrt();
-
-            let lpt_mint_in_f64 = square_orai_amount * square_usdt_amount;
-            let lpt_mint = Uint128::new(lpt_mint_in_f64.round() as u128);
-
-            pool.total_shares += lpt_mint;
-
-            //mint_lpt for user
-            let mint_msg = CosmosMsg::Wasm(WasmMsg::Execute { 
-                contract_addr: contract_info.lpt_contract.to_string(), 
-                msg: to_json_binary(&Cw20ExecuteMsg::Mint { 
-                    recipient: info.sender.to_string(), 
-                    amount: lpt_mint, 
-                })?, 
-                funds: vec![],
-            });
-
-            //update liquidity_providers for user 
-
-            let sender = info.sender.clone();
-
-            let current_lpt_balance = LIQUIDITY_PROVIDERS.may_load(deps.storage, &sender)?.unwrap_or_default();
-
-            let new_lpt_balance = current_lpt_balance + lpt_mint;
-
-            LIQUIDITY_PROVIDERS.save(deps.storage, &sender, &new_lpt_balance)?;
-            //save deps storage pool
-            POOL.save(deps.storage, &pool)?;
-
-            return Ok(Response::new()
-                .add_message(mint_msg)            
-                .add_attribute("action", "add_liquidity")
-                .add_attribute("orai_amouunt", orai_amount.to_string())
-                .add_attribute("usdt_amount", usdt_amount.to_string())
-                .add_attribute("lpt_mint", lpt_mint.to_string())
-            );
+            .find(|coin| coin.denom == DENOM_ORAI)
+            .map(|coin| coin.amount)
+            .unwrap_or_default();
+        if received_orai < amount {
+            return Err(StdError::generic_err(format!(
+                "swap: Insufficient ORAI received. Expected: {}, Received: {}",
+                amount, received_orai
+            )));
         }
 
-        
-        //4.check amount_usdt allowance for contract, sure it equal to usdt_amount
-        // let allowance = get_usdt_allowance(&deps, info.sender.clone().to_string(), env.contract.address.clone().to_string())?;
-        let allowance = get_cw20_token_allowance(
-            &deps, 
-            info.sender.clone().to_string(), 
-            env.contract.address.to_string(), 
-            contract_info.usdt_contract.to_string())?;
+        let swap_amount = calculate_swap_amount(&pool, &denom, amount)?;
+        if swap_amount > pool.usdt_reserve {
+            return Err(StdError::generic_err(format!(
+                "swap: Insufficient USDT liquidity. Required: {}, Available: {}",
+                swap_amount, pool.usdt_reserve
+            )));
+        }
 
-        if allowance < usdt_amount {
-            return Err(ContractError::InvalidTokenAmount {});
-        };
-        //6.kiem tra orai_amount va usdt_amount, cu lay theo ty le nhung neu thua token nao thi phai gui lai cho nguoi dung 
+        pool.orai_reserve += amount;
+        pool.usdt_reserve -= swap_amount;
+        POOL.save(deps.storage, &pool)?;
 
-        // let token_contract = if denom.as_str() == DENOM_USDT {
-        //     contract_info.usdt_contract
-        // } else if denom.as_str() == DENOM_ORAI {
-        //     return Ok(transfer_orai(recipient, amount));
-        // } else {
-        //     return Err(StdError::generic_err("Unsupported token"));
-        // };
-        let unused_orai = if orai_amount.u128() * pool.usdt_reserve.u128() > usdt_amount.u128() * pool.orai_reserve.u128() {
-            Uint128::from(
-                (orai_amount.u128() * pool.usdt_reserve.u128() - usdt_amount.u128() * pool.orai_reserve.u128()) 
-                / pool.usdt_reserve.u128()
-            )
-        } else {
-            Uint128::zero()
-        };
+        let transfer_msg = transfer_usdt(&deps, info.sender.to_string(), swap_amount)?;
+        response = response.add_message(transfer_msg).add_attribute("denom", DENOM_ORAI);
+    } else if denom.as_str() == DENOM_USDT {
+        let approved_usdt = query_cw20_token_allowance(
+            &deps,
+            info.sender.to_string(),
+            env.contract.address.to_string(),
+            &contract_info.usdt_contract.to_string(),
+        )?;
+        if approved_usdt < amount {
+            return Err(StdError::generic_err(format!(
+                "swap: Insufficient USDT allowance. Required: {}, Avaiaclable: {}",
+                amount, approved_usdt
+            )));
+        }
+        let swap_amount = calculate_swap_amount(&pool, &denom, amount)?;
+        if swap_amount > pool.orai_reserve {
+            return Err(StdError::generic_err(format!(
+                "swap: Insufficient ORAI liquidity. Required: {}, Available: {}",
+                swap_amount, pool.orai_reserve
+            )));
+        }
 
-        let unused_usdt = if usdt_amount.u128() * pool.orai_reserve.u128() > orai_amount.u128() * pool.usdt_reserve.u128() {
-            Uint128::from((usdt_amount.u128() * pool.orai_reserve.u128()) - (orai_amount.u128() * pool.usdt_reserve.u128()) / pool.orai_reserve.u128())
-        } else {
-            Uint128::zero()
-        };
-
-        let orai_amount = orai_amount - unused_orai;
-
-        let usdt_amount = usdt_amount - unused_usdt;
-
-        let msg_transfer_unused_token = if orai_amount.u128() * pool.usdt_reserve.u128() > usdt_amount.u128() * pool.orai_reserve.u128() {
-            
-            transfer_orai(info.sender.clone().to_string(), unused_orai)
-        } else {
-           
-            transfer_usdt(&deps, info.sender.clone().to_string(), unused_usdt)
-        }?;
-
-
-        //7. If 6. true
-
-        //calculate lpt_mint
-        let lpt_mint = Uint128::from(orai_amount * pool.total_shares / pool.orai_reserve);
-
-        //update pool state
-        pool.orai_reserve += orai_amount;
-        pool.usdt_reserve += usdt_amount;
-        pool.total_shares += lpt_mint;
-
-        let mint_msg = CosmosMsg::Wasm(WasmMsg::Execute { 
-            contract_addr: contract_info.lpt_contract.to_string(), 
-            msg: to_json_binary(&Cw20ExecuteMsg::Mint { 
-                recipient: info.sender.to_string(), 
-                amount: lpt_mint, 
-            })?, 
+        let transfer_from_msg = CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract_info.usdt_contract.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::TransferFrom {
+                owner: info.sender.to_string(),
+                recipient: env.contract.address.to_string(),
+                amount,
+            })?,
             funds: vec![],
         });
-        //update liquidity_providers for user
 
-        let sender = info.sender.clone();
-
-        let current_lpt_balance = LIQUIDITY_PROVIDERS.may_load(deps.storage, &sender)?.unwrap_or_default();
-
-        let new_lpt_balance = current_lpt_balance + lpt_mint;
-
-        LIQUIDITY_PROVIDERS.save(deps.storage, &sender, &new_lpt_balance)?;
-        //save pool state
-        POOL.save(deps.storage, &pool)?;
-        Ok(Response::new()
-            // .add_message(msg_return_token)
-            .add_message(msg_transfer_unused_token)
-            .add_message(mint_msg)
-            .add_attribute("action", "add_liquidity")
-            .add_attribute("orai_amouunt", orai_amount.to_string())
-            .add_attribute("usdt_amount", usdt_amount.to_string())
-            .add_attribute("lpt_mint", lpt_mint.to_string()))
-    }
-
-    pub fn remove_liquidity(
-        deps: DepsMut,
-        env: Env,
-        info: MessageInfo,
-        lpt_amount: Uint128,
-    ) -> Result<Response, ContractError> {
-        let contract_info = INFO.load(deps.storage)?;
-        //sure lpt_amount != 0
-        if lpt_amount.is_zero() {
-            return Err(ContractError::InvalidTokenAmount {  });
-        };
-
-        //get approved lpt from user 
-        let approved_lpt = get_cw20_token_allowance(
-            &deps, 
-            info.sender.clone().to_string(), 
-            env.contract.address.to_string(), 
-            contract_info.lpt_contract.to_string(),
-        )?;
-        //sure approved_lpt >= lpt_amount 
-        if approved_lpt < lpt_amount {
-            return Err(ContractError::InvalidTokenAmount {  });
-        }
-        //sure lpt_balance >= lpt_amount
-            //get lpt_balance 
-        let sender = info.sender.clone();
-        let current_lpt_balance = LIQUIDITY_PROVIDERS.may_load(deps.storage, &sender)?.unwrap_or_default();
-        if current_lpt_balance < lpt_amount {
-            return  Err(ContractError::InvalidTokenAmount {  });
-        }
-        //calculate orai_amount, usdt_amount
-        let mut pool = POOL.load(deps.storage)?;
-
-        let orai_amount = Uint128::from(lpt_amount * pool.orai_reserve / pool.total_shares);
-        let usdt_amount = Uint128::from(lpt_amount * pool.usdt_reserve / pool.total_shares);
-
-        //update pool state
-        pool.orai_reserve -= orai_amount;
-        pool.usdt_reserve -= usdt_amount;
-        pool.total_shares -= lpt_amount;
-        
-        POOL.save(deps.storage, &pool)?;
-        //update lpt balance in LIQUIDITY_PROVIDER
-        let new_lpt_balance = current_lpt_balance - lpt_amount;
-
-        LIQUIDITY_PROVIDERS.save(deps.storage, &sender, &new_lpt_balance)?;
-
-        //burn lpt from user (user must approve lpt_amount for contract)
-        let burn_msg = CosmosMsg::Wasm(WasmMsg::Execute { 
-            contract_addr: contract_info.lpt_contract.to_string(), 
-            msg: to_json_binary(&Cw20ExecuteMsg::BurnFrom { 
-                owner: info.sender.to_string(), 
-                amount: lpt_amount })?, 
-            funds: vec![] });
-        //transfer orai, usdt for user
-
-            // Transfer ORAI (native token) & USDT for user
- 
-
-        let usdt_transfer_msg = transfer_usdt(&deps, info.sender.clone().to_string(), usdt_amount)?;
-        let orai_transfer_msg = transfer_orai(info.sender.clone().to_string(), orai_amount)?;
-
-        Ok(Response::new()
-            .add_message(burn_msg)
-            .add_message(orai_transfer_msg)
-            .add_message(usdt_transfer_msg)
-            .add_attribute("action", "remove_liquidity")
-            .add_attribute("lpt_amount", lpt_amount.to_string())
-            .add_attribute("receive_usdt", usdt_amount.to_string())
-            .add_attribute("receive_orai", orai_amount.to_string()))
-    }
-
-    pub fn swap(
-        deps: DepsMut,
-        env: Env,
-        info: MessageInfo,
-        denom: String,
-        amount: Uint128,   
-    ) -> Result<Response, ContractError> {
-        let contract_info= INFO.load(deps.storage)?;
-        //check if amount == 0
-        if amount.is_zero() {
-            return Err(ContractError::InvalidTokenAmount {  });
-        }
-        
-        //check approved usdt or amount of orai if message
-        
-
-        if denom.as_str() == DENOM_ORAI {
-            let received_orai = info
-                .funds
-                .iter()
-                .find(|coin| coin.denom == "orai") // Assuming "orai" is the denom for the native ORAI token
-                .map(|coin| coin.amount.clone()) // Retrieve the amount of ORAI received
-                .unwrap_or_default(); // If ORAI is not found, return default value (zero)
-            if received_orai != amount {
-                return Err(ContractError::InvalidTokenAmount {});
-            }
-        } else if denom.as_str() == DENOM_USDT {
-            let approved_usdt = get_cw20_token_allowance(
-                &deps, 
-                info.sender.clone().to_string(), 
-                env.contract.address.clone().to_string(), 
-                contract_info.usdt_contract.to_string())?;
-    
-            if approved_usdt != amount {
-                return Err(ContractError::InvalidTokenAmount {});
-            }
-        } else {
-            return Err(ContractError::InvalidTokenAmount {});
-        }
-        //count amount swap 
-        let mut pool = POOL.load(deps.storage)?;
-        
-        let swap_amount = calculate_swap_amount(&pool, &denom, amount)?;
-
-        //sure enough token with denom type for swap
-        if (denom.as_str() == DENOM_ORAI && swap_amount > pool.usdt_reserve)
-            || (denom.as_str() == DENOM_USDT && swap_amount > pool.orai_reserve) 
-        {
-            return Err(ContractError::InsufficientLiquidity {});
-        }
-
-        //update pool state
-        if denom.as_str() == DENOM_ORAI {
-            pool.orai_reserve += amount;
-            pool.usdt_reserve -= swap_amount;
-        } else if denom.as_str() == DENOM_USDT {
-            pool.usdt_reserve += amount;
-            pool.orai_reserve -= swap_amount;
-        } else {
-            return Err(ContractError::InvalidTokenPair {});
-        }
-
+        pool.usdt_reserve += amount;
+        pool.orai_reserve -= swap_amount;
         POOL.save(deps.storage, &pool)?;
 
-        let transfer_msg = transfer_token(deps, denom, info.sender.clone().to_string(), swap_amount)?;
-        Ok(Response::new()
-            .add_message(transfer_msg)
-            .add_attribute("key", "123"))
+        let transfer_msg = transfer_orai(info.sender.to_string(), swap_amount)?;
+        response = response.add_message(transfer_from_msg).add_message(transfer_msg).add_attribute("denom", DENOM_USDT);
+    } else {
+        return Err(StdError::generic_err("swap: Invalid token denom"));
     }
+
+    Ok(response)
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(
-    deps: Deps, // Use Deps instead of DepsMut
+    deps: Deps,
     _env: Env,
     msg: QueryMsg,
 ) -> StdResult<Binary> {
@@ -479,6 +495,7 @@ pub fn query(
         QueryMsg::QueryContractInfo {} => to_json_binary(&query_contract_info(deps)?),
         QueryMsg::QueryPoolInfo {} => to_json_binary(&query_liquidity_pool_info(deps)?),
         QueryMsg::QueryLptBalance { user } => to_json_binary(&query_lpt_balance(deps, user)?),
+        QueryMsg::QueryUSDTAllowance { user } => to_json_binary(&query_usdt_allowance_amount(deps, user)?),
     }
 }
 
@@ -501,17 +518,50 @@ pub fn query_liquidity_pool_info(deps: Deps) -> StdResult<PoolInfoResponse> {
 }
 
 pub fn query_lpt_balance(deps: Deps, user: String) -> StdResult<LptBalanceResponse> {
-    // Convert the user string to Addr
     let user_addr = deps.api.addr_validate(&user)?;
-
-    // Query the balance from the LIQUIDITY_PROVIDERS map
     let balance = LIQUIDITY_PROVIDERS
         .load(deps.storage, &user_addr)
         .unwrap_or(Uint128::zero());
-
-    // Return the response
     Ok(LptBalanceResponse { balance })
 }
 
+pub fn query_usdt_allowance_amount(deps: Deps, user: String) -> StdResult<USDTAllowanceResponse> {
+    let user_addr = deps.api.addr_validate(&user)?;
+    let usdt_allowance = USDT_ALLOWANCE.load(deps.storage, &user_addr).unwrap_or(Uint128::new(123u128));
+    Ok(USDTAllowanceResponse { usdt_amount: usdt_allowance })
+}
+
 #[cfg(test)]
-mod tests {}
+mod tests {
+    // use super::*;
+    // use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    // use cosmwasm_std::{Addr, coins};
+
+    // #[test]
+    // fn test_add_liquidity_initial() {
+    //     let mut deps = mock_dependencies();
+    //     let env = mock_env();
+    //     let info = mock_info("sender", &coins(100, DENOM_ORAI));
+
+    //     let instantiate_msg = InstantiateMsg {
+    //         usdt_contract: Addr::unchecked("usdt_contract"),
+    //         lpt_contract: Addr::unchecked("lpt_contract"),
+    //     };
+    //     instantiate(deps.as_mut(), env.clone(), info.clone(), instantiate_msg).unwrap();
+
+    //     let res = add_liquidity(
+    //         deps.as_mut(),
+    //         env,
+    //         info,
+    //         Uint128::new(100),
+    //         Uint128::new(300),
+    //     ).unwrap();
+
+    //     let lpt_mint_attr = res
+    //         .attributes
+    //         .iter()
+    //         .find(|attr| attr.key == "lpt_mint")
+    //         .expect("Attribute 'lpt_mint' not found");
+    //     assert_eq!(lpt_mint_attr.value, "55", "lpt_mint should be 55");
+    // }
+}
